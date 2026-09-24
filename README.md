@@ -124,7 +124,7 @@ Setup:
 
 ```bash
 docker compose up -d --build   # Postgres + app; migrations run on boot
-docker compose exec app npx tsx src/seed.ts   # or seed from the host: npm run seed
+docker compose exec app node dist/seed.js   # or seed from the host: npm run seed
 ```
 
 ## Development
