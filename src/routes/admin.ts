@@ -18,8 +18,11 @@ import {
   updateDeploymentSchema,
   updateModelSchema,
   updateProviderSchema,
+  assignBankTransactionSchema,
+  bankTransactionQuerySchema,
 } from "../validation";
 import { prisma } from "../lib/prisma";
+import * as topups from "../payments/topups";
 
 // Operator back-office: catalog, pricing, customers, credit, reporting.
 export const adminRouter = Router();
@@ -139,5 +142,30 @@ adminRouter.get(
     const { limit } = limitQuerySchema.parse(req.query);
     const accountId = typeof req.query.accountId === "string" ? req.query.accountId : undefined;
     res.json(await routerService.listRequests(accountId ? { accountId } : {}, limit, true));
+  }),
+);
+
+// ---- payments (VietQR) ----
+adminRouter.get(
+  "/topups",
+  asyncHandler(async (req, res) => {
+    const { limit } = limitQuerySchema.parse(req.query);
+    const accountId = typeof req.query.accountId === "string" ? req.query.accountId : undefined;
+    res.json(await topups.listTopupOrders(accountId ? { accountId } : {}, limit));
+  }),
+);
+adminRouter.get(
+  "/bank-transactions",
+  asyncHandler(async (req, res) => {
+    const { status, limit } = bankTransactionQuerySchema.parse(req.query);
+    res.json(await topups.listBankTransactions(status, limit));
+  }),
+);
+adminRouter.post(
+  "/bank-transactions/:id/assign",
+  asyncHandler(async (req, res) => {
+    const { accountId } = assignBankTransactionSchema.parse(req.body);
+    await routerService.getAccountOrThrow(accountId);
+    res.status(201).json(await topups.assignBankTransaction(req.params.id, accountId));
   }),
 );

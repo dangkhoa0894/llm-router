@@ -54,6 +54,9 @@ transactions, API keys, streaming playground).
 | admin token | `POST /api/admin/models/:id/deployments`, `PATCH/DELETE /api/admin/deployments/:id` | upstream model, cost, priority/weight |
 | admin token | `GET/POST /api/admin/accounts`, `GET/PATCH /api/admin/accounts/:id`, `POST /api/admin/accounts/:id/keys` | customers, suspend, RPM limit |
 | admin token | `POST /api/admin/accounts/:id/credits` | `{amountUsd, type: TOPUP\|REFUND\|ADJUSTMENT, reference}` — `reference` makes it idempotent |
+| customer key | `POST /api/me/topups {amountVnd}`, `GET /api/me/topups[/:id]`, `DELETE /api/me/topups/:id` | VietQR top-up orders (see below) |
+| SePay | `POST /api/payments/sepay/webhook` | bank-transfer notifications |
+| admin token | `GET /api/admin/topups`, `GET /api/admin/bank-transactions?status=UNMATCHED`, `POST /api/admin/bank-transactions/:id/assign {accountId}` | payment review & manual reconciliation |
 | admin token | `GET /api/admin/usage?days=`, `GET /api/admin/requests?accountId=` | revenue, upstream cost, margin; request log |
 
 ## How it behaves
@@ -74,11 +77,45 @@ transactions, API keys, streaming playground).
 - **Secrets**: provider API keys are never stored in the DB — each provider names the env var it reads,
   and deployments whose key isn't set are skipped.
 
+## Top-ups with VietQR
+
+Customers top up by bank transfer — any Vietnamese banking app can pay it:
+
+1. `POST /api/me/topups {"amountVnd": 200000}` (or the console's "Nạp tiền" box) opens an order with a
+   unique memo like `LLMR7K2Q9XTA` and returns a VietQR code (`payment.qrImage` PNG data URL and the raw
+   `payment.qrPayload`). The QR is built locally to the NAPAS/EMVCo spec — no third-party QR service.
+2. The customer scans and pays; [SePay](https://sepay.vn) watches the receiving account and calls
+   `POST /api/payments/sepay/webhook`.
+3. The router finds the order code in the transfer memo and credits the **amount actually received**,
+   converted at the VND/USD rate locked when the order was created. The order turns `PAID` (the console
+   polls it and updates the balance).
+
+Details:
+- **Idempotent**: each bank transaction is recorded once per `(provider, id)`, so SePay retries (even
+  concurrent ones) never double-credit; the credit ledger reference is `sepay:<id>`.
+- A second transfer to the same code adds to the order; a transfer arriving after the order expired is
+  still credited (expiry only hides the QR).
+- Transfers with no recognizable code are stored as `UNMATCHED` — review them with
+  `GET /api/admin/bank-transactions?status=UNMATCHED` and credit the right customer with
+  `POST /api/admin/bank-transactions/:id/assign`. Outgoing transfers, or transfers into a different account
+  SePay also watches, are stored as `IGNORED`.
+
+Setup:
+1. Set `VIETQR_BANK_BIN`, `VIETQR_ACCOUNT_NO`, `VIETQR_ACCOUNT_NAME`, `VIETQR_BANK_NAME`, `VIETQR_VND_PER_USD`.
+2. In SePay, link that bank account and add a webhook to `https://<your-host>/api/payments/sepay/webhook`
+   with **API Key** authentication; put the same key in `SEPAY_WEBHOOK_API_KEY`.
+3. Send a small real transfer and check it appears under `GET /api/admin/bank-transactions`.
+
+> The SePay payload fields (`id`, `transferType`, `transferAmount`, `content`, `accountNumber`,
+> `transactionDate`…) and the `Authorization: Apikey <key>` header follow SePay's documented webhook
+> format; parsing is lenient, but confirm against your SePay dashboard's test webhook before going live.
+
 ## Before going to production
 
 - Replace the placeholder upstream costs in `src/seed.ts` with current provider prices.
-- Wire a payment gateway (Stripe / VNPay / MoMo / bank-transfer webhooks) to call the credits endpoint
-  with the gateway transaction id as `reference`.
+- VietQR top-ups are built in (above). For card payments (Stripe) add another webhook route that
+  calls `adjustCredit` with the gateway transaction id as `reference`.
+- Update `VIETQR_VND_PER_USD` as the exchange rate moves (orders keep the rate they were opened with).
 - The rate limiter and circuit breaker are in-memory (per process): move them to Redis before running
   more than one replica.
 - Signup has no email verification yet; keep `ROUTER_SIGNUP_CREDIT_USD=0` until it does.

@@ -61,28 +61,31 @@ export interface CreditAdjustment {
 // idempotent: replaying the same reference is rejected with 409.
 export async function adjustCredit(input: CreditAdjustment) {
   try {
-    return await prisma.$transaction(async (tx) => {
-      const exists = await tx.routerAccount.findUnique({ where: { id: input.accountId }, select: { id: true } });
-      if (!exists) throw notFound("Account");
-      const account = await tx.routerAccount.update({
-        where: { id: input.accountId },
-        data: { balanceMicros: { increment: input.amountMicros } },
-      });
-      return tx.creditTransaction.create({
-        data: {
-          accountId: input.accountId,
-          type: input.type,
-          amountMicros: input.amountMicros,
-          balanceAfterMicros: account.balanceMicros,
-          reference: input.reference,
-          note: input.note,
-        },
-      });
-    });
+    return await prisma.$transaction((tx) => creditInTransaction(tx, input));
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
       throw conflict(`A credit transaction with reference "${input.reference}" already exists`);
     }
     throw err;
   }
+}
+
+// For callers that credit as part of a larger transaction (e.g. payments).
+export async function creditInTransaction(tx: Prisma.TransactionClient, input: CreditAdjustment) {
+  const exists = await tx.routerAccount.findUnique({ where: { id: input.accountId }, select: { id: true } });
+  if (!exists) throw notFound("Account");
+  const account = await tx.routerAccount.update({
+    where: { id: input.accountId },
+    data: { balanceMicros: { increment: input.amountMicros } },
+  });
+  return tx.creditTransaction.create({
+    data: {
+      accountId: input.accountId,
+      type: input.type,
+      amountMicros: input.amountMicros,
+      balanceAfterMicros: account.balanceMicros,
+      reference: input.reference,
+      note: input.note,
+    },
+  });
 }

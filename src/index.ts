@@ -5,6 +5,7 @@ import { config } from "./config";
 import { errorHandler } from "./middleware/errorHandler";
 import { accountRouter } from "./routes/account";
 import { adminRouter } from "./routes/admin";
+import { paymentsRouter } from "./routes/payments";
 import { v1Router } from "./routes/v1";
 
 const app = express();
@@ -21,6 +22,7 @@ app.get("/health", (_req, res) => {
 });
 
 app.use("/api/admin", adminRouter);
+app.use("/api/payments", paymentsRouter);
 app.use("/api", accountRouter);
 
 app.use(errorHandler);
