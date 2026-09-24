@@ -68,3 +68,10 @@ export const signupSchema = z.object({ name: z.string().min(1), email: z.string(
 
 export const daysQuerySchema = z.object({ days: z.coerce.number().int().min(1).max(366).default(30) });
 export const limitQuerySchema = z.object({ limit: z.coerce.number().int().min(1).max(500).default(50) });
+
+export const createTopupSchema = z.object({ amountVnd: z.number().int().positive() });
+export const assignBankTransactionSchema = z.object({ accountId: z.string().min(1) });
+export const bankTransactionQuerySchema = z.object({
+  status: z.enum(["MATCHED", "UNMATCHED", "IGNORED"]).optional(),
+  limit: z.coerce.number().int().min(1).max(500).default(50),
+});

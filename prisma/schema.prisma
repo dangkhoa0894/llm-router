@@ -56,9 +56,11 @@ model RouterAccount {
   createdAt     DateTime            @default(now())
   updatedAt     DateTime            @updatedAt
 
-  apiKeys      RouterApiKey[]
-  transactions CreditTransaction[]
-  requests     RouterRequest[]
+  apiKeys          RouterApiKey[]
+  transactions     CreditTransaction[]
+  requests         RouterRequest[]
+  topupOrders      TopupOrder[]
+  bankTransactions BankTransaction[]
 }
 
 // Only the SHA-256 of the key is stored; the plaintext is shown once at creation.
@@ -186,4 +188,67 @@ model RouterRequest {
 
   @@index([accountId, createdAt])
   @@index([modelId, createdAt])
+}
+
+// =========================================================================
+// PAYMENTS (VietQR bank-transfer top-ups)
+// A customer opens a TopupOrder, pays by scanning a VietQR code whose
+// transfer memo carries the order's unique `code`, and a bank-feed webhook
+// (SePay) reports the incoming transfer as a BankTransaction, which is
+// matched to the order by that code and credited to the account.
+// =========================================================================
+
+enum TopupOrderStatus {
+  PENDING
+  PAID
+  EXPIRED
+  CANCELLED
+}
+
+enum BankTransactionStatus {
+  MATCHED // credited to an account
+  UNMATCHED // incoming money with no recognizable order code — needs manual review
+  IGNORED // outgoing transfer, or otherwise not a top-up
+}
+
+model TopupOrder {
+  id            String           @id @default(cuid())
+  accountId     String
+  code          String           @unique // transfer memo, e.g. "LLMR7K2Q9XTA"
+  amountVnd     Int // amount the customer is asked to transfer
+  vndPerUsd     Int // exchange rate locked in when the order was created
+  status        TopupOrderStatus @default(PENDING)
+  paidAmountVnd Int              @default(0) // summed over every transfer matched to this order
+  creditMicros  BigInt           @default(0) // what was actually credited
+  expiresAt     DateTime
+  paidAt        DateTime?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  account          RouterAccount     @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  bankTransactions BankTransaction[]
+
+  @@index([accountId, createdAt])
+}
+
+model BankTransaction {
+  id          String                @id @default(cuid())
+  provider    String // "sepay"
+  externalId  String // the provider's transaction id; (provider, externalId) dedupes webhook retries
+  direction   String // "in" | "out"
+  amountVnd   Int
+  content     String                @db.Text // transfer memo as the bank reported it
+  bankAccount String?
+  occurredAt  DateTime?
+  status      BankTransactionStatus
+  orderId     String?
+  accountId   String? // who was credited (set for MATCHED, incl. manual assignment)
+  raw         Json
+  createdAt   DateTime              @default(now())
+
+  order   TopupOrder?    @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  account RouterAccount? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+
+  @@unique([provider, externalId])
+  @@index([status, createdAt])
 }

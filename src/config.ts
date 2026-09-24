@@ -17,4 +17,21 @@ export const config = {
   signupCreditUsd: Number(process.env.ROUTER_SIGNUP_CREDIT_USD ?? 0),
   // Default sell-price markup over upstream cost used by the seed script.
   defaultMarkup: Number(process.env.ROUTER_DEFAULT_MARKUP ?? 0.2),
+  // VietQR bank-transfer top-ups (see src/payments). Disabled unless the
+  // receiving bank account is configured.
+  vietqr: {
+    bankBin: optional("VIETQR_BANK_BIN"), // 6-digit NAPAS BIN, e.g. 970422 (MB Bank)
+    bankName: process.env.VIETQR_BANK_NAME ?? "",
+    accountNo: optional("VIETQR_ACCOUNT_NO"),
+    accountName: process.env.VIETQR_ACCOUNT_NAME ?? "",
+    vndPerUsd: Number(process.env.VIETQR_VND_PER_USD ?? 26000),
+    minVnd: Number(process.env.VIETQR_MIN_VND ?? 10000),
+    maxVnd: Number(process.env.VIETQR_MAX_VND ?? 50_000_000),
+    orderTtlMinutes: Number(process.env.VIETQR_ORDER_TTL_MINUTES ?? 30),
+    // Transfer memos look like <prefix><8 chars>; letters/digits only, since
+    // banks strip or mangle punctuation in memos.
+    codePrefix: (process.env.TOPUP_CODE_PREFIX ?? "LLMR").toUpperCase(),
+  },
+  // Secret SePay sends with every webhook (Authorization: Apikey <key>).
+  sepayWebhookApiKey: optional("SEPAY_WEBHOOK_API_KEY"),
 };
