@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>LLM Console</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 960px; padding: 0 1rem; color: #1a1a1a; }
+  h1 { font-size: 1.4rem; } h2 { font-size: 1.05rem; margin-top: 2rem; }
+  input, button, select, textarea { font-size: 0.95rem; padding: 0.4rem; }
+  textarea { width: 100%; box-sizing: border-box; }
+  table { border-collapse: collapse; width: 100%; margin-top: 0.5rem; }
+  th, td { border-bottom: 1px solid #e5e5e5; padding: 0.45rem; text-align: left; font-size: 0.88rem; }
+  th { background: #f7f7f7; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .muted { color: #777; font-size: 0.85rem; }
+  .balance { font-size: 1.6rem; font-weight: 600; }
+  .err { color: #b00020; }
+  pre { background: #f4f4f4; padding: 0.8rem; white-space: pre-wrap; border-radius: 4px; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+  <h1>LLM Console</h1>
+  <p class="muted">Nhập API key để xem số dư, lượng dùng và thử mô hình. Key chỉ được lưu trong trình duyệt này. <a href="/models.html">Bảng giá</a></p>
+  <input id="key" type="password" placeholder="sk-rt-..." size="50" />
+  <button id="login">Đăng nhập</button>
+  <p id="error" class="err"></p>
+
+  <div id="app" class="hidden">
+    <p>Tài khoản <strong id="name"></strong> · <span id="email" class="muted"></span></p>
+    <div class="muted">Số dư</div>
+    <div class="balance" id="balance"></div>
+
+    <h2>Playground</h2>
+    <select id="model"></select>
+    <textarea id="prompt" rows="3">Giới thiệu ngắn về Hà Nội.</textarea>
+    <button id="send">Gửi (stream)</button>
+    <pre id="answer" class="hidden"></pre>
+
+    <h2>Sử dụng 30 ngày</h2>
+    <table><thead><tr><th>Ngày</th><th>Mô hình</th><th class="num">Requests</th><th class="num">Input tok</th><th class="num">Output tok</th><th class="num">Chi phí</th></tr></thead><tbody id="usage"></tbody></table>
+
+    <h2>API keys</h2>
+    <input id="keyName" placeholder="tên key" /> <button id="newKey">Tạo key</button>
+    <pre id="newKeyOut" class="hidden"></pre>
+    <table><thead><tr><th>Tên</th><th>Key</th><th>Dùng lần cuối</th><th></th></tr></thead><tbody id="keys"></tbody></table>
+
+    <h2>Giao dịch</h2>
+    <table><thead><tr><th>Thời gian</th><th>Loại</th><th class="num">Số tiền</th><th class="num">Số dư sau</th></tr></thead><tbody id="tx"></tbody></table>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+    const usd = (v) => (v < 0 ? '-$' : '$') + Math.abs(v).toFixed(6).replace(/0{1,4}$/, '');
+    const when = (d) => d ? new Date(d).toLocaleString('vi-VN') : '—';
+    let apiKey = '';
+    try { apiKey = localStorage.getItem('routerKey') ?? ''; } catch {}
+    $('key').value = apiKey;
+
+    async function api(path, opts = {}) {
+      const res = await fetch(path, { ...opts, headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json', ...opts.headers } });
+      const body = res.status === 204 ? null : await res.json();
+      if (!res.ok) throw new Error(body?.error?.message ?? body?.error ?? res.statusText);
+      return body;
+    }
+
+    async function load() {
+      $('error').textContent = '';
+      try {
+        const [me, usage, keys, tx, models] = await Promise.all([
+          api('/api/me'), api('/api/me/usage'), api('/api/me/keys'),
+          api('/api/me/transactions?limit=20'), fetch('/v1/models').then((r) => r.json()),
+        ]);
+        try { localStorage.setItem('routerKey', apiKey); } catch {}
+        $('app').classList.remove('hidden');
+        $('name').textContent = me.name; $('email').textContent = me.email; $('balance').textContent = usd(me.balanceUsd);
+        $('model').innerHTML = models.data.filter((m) => m.type === 'chat').map((m) => `<option>${esc(m.id)}</option>`).join('');
+        $('usage').innerHTML = usage.map((u) => `<tr><td>${u.day}</td><td>${esc(u.model)}</td><td class="num">${u.requests}</td><td class="num">${u.inputTokens.toLocaleString()}</td><td class="num">${u.outputTokens.toLocaleString()}</td><td class="num">${usd(u.chargeUsd)}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">Chưa có.</td></tr>';
+        $('keys').innerHTML = keys.map((k) => `<tr><td>${esc(k.name)}</td><td><code>${esc(k.prefix)}…</code></td><td>${k.revokedAt ? 'đã thu hồi' : when(k.lastUsedAt)}</td><td>${k.revokedAt ? '' : `<button data-revoke="${esc(k.id)}">Thu hồi</button>`}</td></tr>`).join('');
+        $('tx').innerHTML = tx.map((t) => `<tr><td>${when(t.createdAt)}</td><td>${t.type}</td><td class="num">${usd(t.amountUsd)}</td><td class="num">${usd(t.balanceAfterUsd)}</td></tr>`).join('');
+      } catch (err) {
+        $('error').textContent = err.message;
+      }
+    }
+
+    $('login').onclick = () => { apiKey = $('key').value.trim(); load(); };
+    $('keys').onclick = async (e) => {
+      const id = e.target.dataset?.revoke;
+      if (id && confirm('Thu hồi key này?')) { await api(`/api/me/keys/${id}`, { method: 'DELETE' }); load(); }
+    };
+    $('newKey').onclick = async () => {
+      const key = await api('/api/me/keys', { method: 'POST', body: JSON.stringify({ name: $('keyName').value || 'default' }) });
+      $('newKeyOut').textContent = `Key mới (chỉ hiện một lần):\n${key.key}`;
+      $('newKeyOut').classList.remove('hidden');
+      load();
+    };
+
+    $('send').onclick = async () => {
+      const out = $('answer');
+      out.classList.remove('hidden'); out.textContent = '';
+      const res = await fetch('/v1/chat/completions', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: $('model').value, stream: true, messages: [{ role: 'user', content: $('prompt').value }] }),
+      });
+      if (!res.ok) { out.textContent = (await res.json()).error?.message ?? res.statusText; return; }
+      const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+      let buffer = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += value;
+        const events = buffer.split('\n\n'); buffer = events.pop();
+        for (const ev of events) {
+          const data = ev.replace(/^data: ?/, '');
+          if (data === '[DONE]' || !ev.startsWith('data:')) continue;
+          try { out.textContent += JSON.parse(data).choices?.[0]?.delta?.content ?? ''; } catch {}
+        }
+      }
+      load();
+    };
+
+    if (apiKey) load();
+  </script>
+</body>
+</html>

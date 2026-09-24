@@ -1,0 +1,189 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =========================================================================
+// LLM ROUTER (resell LLM inference behind one OpenAI-compatible API,
+// DeepInfra-style). Customers hold prepaid credit on a RouterAccount and
+// authenticate with RouterApiKeys; each public RouterModel is served by one
+// or more RouterDeployments (an upstream model on a RouterProvider) that the
+// router falls back across.
+//
+// Money is stored as BigInt micro-USD (1 USD = 1_000_000 micros). Prices are
+// per 1M tokens, so a per-token price has 1e-12 USD granularity.
+// =========================================================================
+
+enum RouterAccountStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum RouterModelType {
+  CHAT
+  EMBEDDING
+}
+
+enum RouterRoutingStrategy {
+  PRIORITY // lowest `priority` first, fall back down the list
+  LOWEST_COST // cheapest upstream first (maximizes margin)
+  WEIGHTED // random, proportional to `weight` (spreads load)
+}
+
+enum CreditTransactionType {
+  TOPUP
+  USAGE
+  REFUND
+  ADJUSTMENT
+}
+
+enum RouterRequestStatus {
+  SUCCESS
+  ERROR
+}
+
+model RouterAccount {
+  id            String              @id @default(cuid())
+  name          String
+  email         String              @unique
+  status        RouterAccountStatus @default(ACTIVE)
+  balanceMicros BigInt              @default(0)
+  rpmLimit      Int                 @default(60) // requests per minute, across all of the account's keys
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  apiKeys      RouterApiKey[]
+  transactions CreditTransaction[]
+  requests     RouterRequest[]
+}
+
+// Only the SHA-256 of the key is stored; the plaintext is shown once at creation.
+model RouterApiKey {
+  id         String    @id @default(cuid())
+  accountId  String
+  name       String
+  prefix     String // first chars of the plaintext key, for display ("sk-rt-AbC1…")
+  keyHash    String    @unique
+  lastUsedAt DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  account  RouterAccount   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  requests RouterRequest[]
+
+  @@index([accountId])
+}
+
+// An upstream inference host exposing an OpenAI-compatible API (DeepInfra,
+// OpenAI, Groq, Together, Gemini's OpenAI endpoint, a self-hosted vLLM...).
+// The secret itself never touches the DB: `apiKeyEnv` names the env var.
+model RouterProvider {
+  id        String   @id @default(cuid())
+  slug      String   @unique
+  name      String
+  baseUrl   String // e.g. https://api.deepinfra.com/v1/openai (no trailing slash)
+  apiKeyEnv String // e.g. DEEPINFRA_API_KEY
+  isEnabled Boolean  @default(true)
+  timeoutMs Int      @default(60000) // time allowed until upstream response headers
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  deployments RouterDeployment[]
+}
+
+// A model as sold to customers, with its sell price.
+model RouterModel {
+  id                       String                @id @default(cuid())
+  slug                     String                @unique // public model id, e.g. "meta-llama/Llama-3.3-70B-Instruct"
+  displayName              String
+  description              String?
+  type                     RouterModelType       @default(CHAT)
+  contextLength            Int?
+  inputPricePerMTokMicros  BigInt // sell price per 1M input tokens
+  outputPricePerMTokMicros BigInt                @default(0) // sell price per 1M output tokens
+  strategy                 RouterRoutingStrategy @default(PRIORITY)
+  isPublic                 Boolean               @default(true) // listed in /v1/models
+  isEnabled                Boolean               @default(true)
+  createdAt                DateTime              @default(now())
+  updatedAt                DateTime              @updatedAt
+
+  deployments RouterDeployment[]
+  requests    RouterRequest[]
+}
+
+// One way to serve a RouterModel: an upstream model id on a provider, with
+// what that upstream charges us (to track margin).
+model RouterDeployment {
+  id                      String   @id @default(cuid())
+  modelId                 String
+  providerId              String
+  upstreamModel           String
+  priority                Int      @default(0)
+  weight                  Int      @default(1)
+  inputCostPerMTokMicros  BigInt   @default(0)
+  outputCostPerMTokMicros BigInt   @default(0)
+  isEnabled               Boolean  @default(true)
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  model    RouterModel     @relation(fields: [modelId], references: [id], onDelete: Cascade)
+  provider RouterProvider  @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  requests RouterRequest[]
+
+  @@unique([modelId, providerId, upstreamModel])
+}
+
+// Append-only ledger; RouterAccount.balanceMicros is its running total.
+model CreditTransaction {
+  id                 String                @id @default(cuid())
+  accountId          String
+  type               CreditTransactionType
+  amountMicros       BigInt // signed: positive adds credit, negative consumes it
+  balanceAfterMicros BigInt
+  requestId          String?               @unique
+  reference          String? // external payment id, for idempotent top-ups
+  note               String?
+  createdAt          DateTime              @default(now())
+
+  account RouterAccount  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  request RouterRequest? @relation(fields: [requestId], references: [id], onDelete: SetNull)
+
+  @@unique([accountId, reference])
+  @@index([accountId, createdAt])
+}
+
+// One customer API call (after auth), successful or not.
+model RouterRequest {
+  id             String              @id @default(cuid())
+  accountId      String
+  apiKeyId       String
+  modelId        String?
+  deploymentId   String?
+  modelSlug      String // as requested by the customer
+  endpoint       String // "chat/completions" | "completions" | "embeddings"
+  stream         Boolean             @default(false)
+  status         RouterRequestStatus
+  httpStatus     Int
+  errorMessage   String?             @db.Text
+  inputTokens    Int                 @default(0)
+  outputTokens   Int                 @default(0)
+  usageEstimated Boolean             @default(false) // upstream sent no usage; tokens estimated from text length
+  costMicros     BigInt              @default(0) // what the upstream charges us
+  chargeMicros   BigInt              @default(0) // what we bill the customer
+  attempts       Int                 @default(0) // upstream calls made (>1 means fallback kicked in)
+  latencyMs      Int                 @default(0)
+  createdAt      DateTime            @default(now())
+
+  account     RouterAccount      @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  apiKey      RouterApiKey       @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+  model       RouterModel?       @relation(fields: [modelId], references: [id], onDelete: SetNull)
+  deployment  RouterDeployment?  @relation(fields: [deploymentId], references: [id], onDelete: SetNull)
+  transaction CreditTransaction?
+
+  @@index([accountId, createdAt])
+  @@index([modelId, createdAt])
+}
